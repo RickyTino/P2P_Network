@@ -1,3 +1,10 @@
+## 20191025
+- 第一阶段目标：UDP Peer Discovery Protocol
+- main: 6个不同端口号的主线程
+  - 主线程：connect函数
+    - connect(ip, port): ping并collect pong
+    - 线程：接收、处理和forward ping message
+
 ## 20191020
 - 要学的：
   - java socket
@@ -81,3 +88,4 @@
 ### 待定的参数：
 - 向邻居发送心跳包的时延
 - 心跳包超时时延
+- 收集PDP pong的时长
