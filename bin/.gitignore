@@ -1,2 +1,7 @@
 /Peer.class
 /PdpServerThread.class
+/NeighborThread.class
+/PeerWelcomeThread.class
+/Neighbor.class
+/PeerList.class
+/NeighborWelcomeThread.class
