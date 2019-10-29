@@ -1,3 +1,36 @@
+## 20191029
+- 关于Query protocol:
+  - 新建类：Query，包含queryID、filename和ArrayList\<Neighbor\> senders;
+  - 新建静态变量：ArrayList\<Query\> queries;
+  - p2p类的静态变量：
+    - queryFlag, queryID, queryFile;
+    - ansFlag， ansAddr, ansPort
+  - 主线程函数：收到Get file命令时：
+    - if(自己有该文件) 打印提示并不做操作;
+    - else 
+      - 更新queryID和queryFile，syn设queryFlag=true;
+      - 调用socket.outStream发出query;
+      - 等待ansFlag并检测超时，超时打印信息并退出函数；
+      - 读取ansAddr和ansPort; （测试阶段：输出地址和port就行）
+      - 新建Socket(ansAddr, ansPort) 并发出文件请求；
+      - 接收并保存文件
+  - NT线程：
+    - if (接收到query)
+      - if (自己有该文件) 组织回送信息;
+      - else if (queries中有记录重复query) 向该query的senders中添加该线程的conn;
+      - else 新建query并添加到queries; 
+    - else if (接收到answer)
+      - if (query三件套符合) 写ansAddr和ansPort，syn设置ansFlag=true;
+      - else if (queries中有符合记录) 向每个sender转发消息
+      - else 丢弃该消息
+  - TWT线程：
+    - 建立ServerSocket监听
+    - while (true)
+      - Socket s = serverSocket.accept();
+      - 读取请求，处理字符串，获取文件名
+      - 读文件并向socket传输
+      - s.close();
+
 ## 20191025
 - 第一阶段目标：UDP Peer Discovery Protocol
 - main: 6个不同端口号的主线程
