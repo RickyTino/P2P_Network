@@ -58,6 +58,19 @@ class Neighbor {
 	}
 }
 
+class Query {
+	int id;
+	String file;
+	ArrayList<Neighbor> senders;
+	
+	public Query(int qid, String qfile, Neighbor qsender) {
+		id = qid;
+		file = qfile;
+		senders = new ArrayList<Neighbor>();
+		senders.add(qsender);
+	}
+}
+
 // ------------------------------Threads------------------------------
 
 class PdpThread extends Thread {
@@ -302,16 +315,27 @@ public class p2p {
 	// Lists
 	static ArrayList<Neighbor> neighbors;				// Neighboring peer connections (have TCP connections) 
 	static ArrayList<Peer> peers;						// All known peers
+	static ArrayList<Query> queries;					// Queries from another peer
+	static ArrayList<String> files;						// All sharing files
 	
 //	// Flags
 //	static Boolean stopAll;
+	// Variables
+	static int queryID;
+	static String queryFile;
+	static boolean queryFlag;
+	
 	
 	public static void main(String[] args) {
-		System.out.println("Starting the peer...");
 		
 		neighbors = new ArrayList<Neighbor>();
 		peers = new ArrayList<Peer>();
-//		stopAll = false;
+		queries = new ArrayList<Query>();
+		files = new ArrayList<String>();
+		queryID = 0;
+		queryFlag = false;
+		
+		System.out.println("Starting the peer...");
 		
 		if(args.length >= 3) {
 			ntcpPort = Integer.valueOf(args[0]);
@@ -327,12 +351,19 @@ public class p2p {
 		else {
 			readConfigPeer();
 		}
+//		readConfigPeer();
+		readConfigSharing();
 
 		System.out.println("Neighbor TCP port: " + ntcpPort);
 		System.out.println("File transfer TCP port: " + ftcpPort);
 		System.out.println("Peer Discovery UDP port: " + pdpPort);
 		System.out.println("Local HostAddress: "+ ipAddrStr);
 		System.out.println("Local host name: "+ ipAddr.getHostName());
+		
+		System.out.println("Files ready to share:");
+		for(String s : files) {
+			System.out.println(s);
+		}
 		
 		pdpInit();
 		ntcpInit();
@@ -375,7 +406,7 @@ public class p2p {
 		}
 	}
 	
-	public static void readConfigPeer(){
+	static void readConfigPeer(){
 		String pwd = p2p.class.getResource("").getPath() + "config_peer.txt";
 		try {
 			Scanner scn = new Scanner(new File(pwd));
@@ -400,6 +431,20 @@ public class p2p {
 		} catch (UnknownHostException e) {
 			System.out.println(e);
 		};
+	}
+	
+	static void readConfigSharing() {
+		String pwd = p2p.class.getResource("").getPath() + "config_sharing.txt";
+		try {
+			Scanner scn = new Scanner(new File(pwd));
+			while(scn.hasNext()) {
+				files.add(scn.nextLine());
+			}
+			scn.close();
+		} catch (FileNotFoundException fnfe) {
+			System.out.println(fnfe);
+			System.out.println("Warning: Lacking config_sharing.txt!");
+		}
 	}
 	
 	static void pdpInit(){
