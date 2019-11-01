@@ -1,3 +1,11 @@
+## 20191031
+- 修复了部分线程安全问题
+- 基本完成查询协议
+  - 问题：一个peer在收到response之后又收到request，是否判断重复？
+  - 解决方案：Query的移除只在timeout进行，是否收到回复要另外标记
+  - 已解决
+- 心跳包输出被注释掉了，记得恢复
+- 接下来就是文件传输了！
 ## 20191029
 - 关于Query protocol:
   - 新建类：Query，包含queryID、filename和ArrayList\<Neighbor\> senders;
@@ -18,10 +26,10 @@
     - if (接收到query)
       - if (自己有该文件) 组织回送信息;
       - else if (queries中有记录重复query) 向该query的senders中添加该线程的conn;
-      - else 新建query并添加到queries; 
+      - else 新建query并添加到queries，然后forward message;
     - else if (接收到answer)
       - if (query三件套符合) 写ansAddr和ansPort，syn设置ansFlag=true;
-      - else if (queries中有符合记录) 向每个sender转发消息
+      - else if (queries中有符合记录) 向每个sender转发消息，并删除query
       - else 丢弃该消息
   - TWT线程：
     - 建立ServerSocket监听
