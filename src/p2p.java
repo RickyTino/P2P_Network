@@ -49,11 +49,9 @@ class Neighbor {
 		stop = false;
 	}
 	
-	synchronized void close() {//throws IOException {
+	synchronized void close() {
 		stop = true;
 		try {
-			inStream.close();
-			outStream.close();
 			socket.close();
 		} catch (IOException e) {
 			e.printStackTrace();
@@ -103,13 +101,13 @@ class PdpThread extends Thread {
 			String recvMsg = new String(recvPacket.getData()).trim();
 			InetAddress fromAddr = recvPacket.getAddress();
 			int fromPort = recvPacket.getPort();
-			System.out.println("PDP> Message received: <" + recvMsg + ">");
+			System.out.println("PDP> Message received: \"" + recvMsg + "\".");
 			String header = recvMsg.substring(0,3);
 			
 			try {
-				int separator = recvMsg.lastIndexOf(":");
-				addr = InetAddress.getByName(recvMsg.substring(3, separator));
-				port = Integer.valueOf(recvMsg.substring(separator + 1));
+				int colon = recvMsg.lastIndexOf(":");
+				addr = InetAddress.getByName(recvMsg.substring(3, colon));
+				port = Integer.valueOf(recvMsg.substring(colon + 1));
 			} catch (NumberFormatException e) {
 				e.printStackTrace();
 				continue;
@@ -121,21 +119,26 @@ class PdpThread extends Thread {
 			if(header.equals("PI:")) {
 				Peer newPeer = new Peer(addr, port);
 				if(p2p.peers.contains(newPeer)) {
-					System.out.println("PDP> Debug: Duplicate Peer");
+					System.out.println("PDP> Ping from duplicate Peer, ignored.");
 					continue;
 				}
-				msgBroadcast(recvData);
-				p2p.peers.add(newPeer);
-				try {
+				
+				// Load balancing
+				if(p2p.neighbors.size() < 3) {
 					sendPong(addr, port);
-				} catch (IOException e) {
-					e.printStackTrace();
+					msgBroadcast(recvData);
 				}
+				else {
+					msgBroadcast(recvData);
+					sendPong(addr, port);
+				}
+				
+				p2p.peers.add(newPeer);
 			}
 			else if(header.equals("PO:")) {
 				Peer fromPeer = new Peer(fromAddr, fromPort);
 				if(p2p.peers.contains(fromPeer)) {
-					System.out.println("PDP> Debug: From duplicate Peer");
+					System.out.println("PDP> Pong From duplicate peer, ignored.");
 					continue;
 				}
 				
@@ -144,7 +147,7 @@ class PdpThread extends Thread {
 				
 				if(p2p.neighbors.size() < 2) {
 					String peerStr = addr.getHostAddress() + ":" + port;
-					System.out.println("PDP> Establishing TCP connection with " + peerStr);
+					System.out.println("PDP> Establishing TCP connection with " + peerStr + "...");
 					try {
 						Socket socket = new Socket(addr, port);
 //						Socket socket = new Socket();
@@ -156,33 +159,38 @@ class PdpThread extends Thread {
 						neighborThread.start();
 					} catch (IOException e) {
 						e.printStackTrace();
-						System.out.println("PDP> Failed to establish TCP connection with " + peerStr);
+						System.out.println("PDP> Failed establishing TCP connection with " + peerStr + "!");
 					}
-					System.out.println("PDP> TCP connection established with " + peerStr);
+					System.out.println("PDP> TCP connection established with " + peerStr + ".");
 				}
 			}
 		}
 	}
 	
-	void sendPong(InetAddress addr, int port) throws IOException{
+	void sendPong(InetAddress addr, int port) {// throws IOException{
 		String thisPeerStr = p2p.ipAddr.getHostAddress() + ":" + p2p.ntcpPort;
 		String peerStr = addr.getHostAddress() + ":" + port;
 		
 		String msg = new String("PO:" + thisPeerStr);
-		System.out.println("PDP> Ready to send Pong message:<" + msg + ">.");
+		System.out.println("PDP> Ready to send Pong message: \"" + msg + "\".");
 		
 		byte[] sendData = msg.getBytes();
 		DatagramPacket sendPacket = new DatagramPacket(sendData, sendData.length, addr, port);
 		synchronized (p2p.pdpSocket) {
-			p2p.pdpSocket.send(sendPacket);
+			try {
+				p2p.pdpSocket.send(sendPacket);
+			} catch (IOException e) {
+				e.printStackTrace();
+				System.out.println("PDP> Error: failed sending Pong message.");
+			}
 		}
 		
-		System.out.println("PDP> Pong message sent to " + peerStr);
+		System.out.println("PDP> Pong message sent to " + peerStr + ".");
 	}
 	
 	void msgBroadcast(byte[] sendData) {
 		for (Peer p : p2p.peers) {
-			System.out.println("PDP> Broadcasting " + new String(sendData).trim() + " to " + p.outStr);
+			System.out.println("PDP> Broadcasting " + new String(sendData).trim() + " to " + p.outStr + "...");
 			DatagramPacket sendPacket = new DatagramPacket(sendData, sendData.length, p.addr, p.port);
 			try {
 				synchronized (p2p.pdpSocket) {
@@ -193,7 +201,6 @@ class PdpThread extends Thread {
 				System.out.println("PDP> Error: Failed to send the packet to " + p.outStr);
 			}
 		}
-		System.out.println("PDP> Broadcasting finished.");
 	}
 }
 
@@ -205,7 +212,7 @@ class NeighborWelcomeThread extends Thread {
 				Socket newSocket = p2p.ntcpServerSocket.accept();
 				Neighbor neighbor = new Neighbor(newSocket);
 				p2p.neighbors.add(neighbor);
-				System.out.println("NWT> TCP Connection created with " + neighbor.outStr);
+				System.out.println("PDP> TCP connection established with " + neighbor.outStr + ".");
 				Thread neighborThread = new NeighborThread(neighbor);
 				neighborThread.start();
 			} catch (IOException e) {
@@ -237,42 +244,36 @@ class NeighborThread extends Thread {
 				}
 				
 				if(recvMsg.length() == 0) {
-//					System.out.println("NT> Heartbeat message received from " + conn.outStr + ".");
+					System.out.println("HB > Heartbeat message received from " + conn.outStr + ".");
 				}
 				else {
-					System.out.println("NT> Message recieved from " + conn.outStr + ";");
 					int colon = recvMsg.indexOf(":");
 					String header = recvMsg.substring(0, colon);
 					int semicolon = recvMsg.indexOf(";");
 					int qid = Integer.valueOf(recvMsg.substring(colon + 1, semicolon));
 					
 					if(header.equals("Q")) {
-						System.out.println("NT> Query message:<" + recvMsg + ">.");
+						System.out.println("QP > Received query message \"" + recvMsg + "\" from " + conn.outStr + ".");
 						String filename = recvMsg.substring(semicolon + 1);
 						Query q = new Query(qid, filename);
 						if(p2p.queryFile.equals(filename) && p2p.queryID == qid) {
-							System.out.println("NT> Duplicate query from this peer. ");
+							System.out.println("QP > Loopback query, ignored.");
 						}
 						else if(p2p.files.contains(filename)) {
-							System.out.println("NT> File found, sending response...");
+							System.out.println("QP > File found, sending response...");
 							String reply = "R:" + qid + ";" + p2p.ipAddrStr + ":" + p2p.ftcpPort + ";" + filename + "\n";
 							synchronized (conn.outStream) {
 								conn.outStream.writeBytes(reply);
 							}
-							System.out.println("NT> Response sent to " + conn.outStr + ".");
+							System.out.println("QP > Response sent to " + conn.outStr + ".");
 						}
 						else synchronized (p2p.queries) {
 							if(p2p.queries.contains(q)) {
-								System.out.println("NT> File not found & duplicate query.");
-//								int i = p2p.queries.indexOf(q);
-//								Query thisQuery = p2p.queries.get(i);
-//								if(!thisQuery.senders.contains(conn))
-//									thisQuery.senders.add(conn);
+								System.out.println("QP > File not found, duplicate query, ignored.");
 							}
 							else {
-								System.out.println("NT> File not found, forwarding to neighbors...");
+								System.out.println("QP > File not found, forwarding to neighbors...");
 								Query newQuery = new Query(qid, filename);
-//								newQuery.senders.add(conn);
 								newQuery.sender = conn;
 								p2p.queries.add(newQuery);
 								QueryTimeOutThread qtot = new QueryTimeOutThread(newQuery);
@@ -284,17 +285,17 @@ class NeighborThread extends Thread {
 										synchronized (n.outStream) {
 											n.outStream.writeBytes(recvMsg + "\n");
 										}
-										System.out.println("NT> Query forwarded to " + n.outStr + ".");
+										System.out.println("QP > Query forwarded to " + n.outStr + ".");
 									} catch (IOException e) {
 										e.printStackTrace();
-										System.out.println("NT> Failed forwarding query to " + n.outStr + ".");
+										System.out.println("QP > Failed forwarding query to " + n.outStr + ".");
 									}
 								}
 							}
 						}
 					}
 					else if(header.equals("R")) {
-						System.out.println("NT> Response message:<" + recvMsg + ">.");
+						System.out.println("QP > Received response message \"" + recvMsg + "\" from " + conn.outStr + ".");
 						int colon2 = recvMsg.lastIndexOf(":");
 						int semicolon2 = recvMsg.lastIndexOf(";");
 						String addrStr = recvMsg.substring(semicolon + 1, colon2);
@@ -302,66 +303,58 @@ class NeighborThread extends Thread {
 						String filename = recvMsg.substring(semicolon2 + 1);
 						Query q = new Query(qid, filename);
 						if(p2p.queryFlag && p2p.queryFile.equals(filename) && p2p.queryID == qid) {
-							System.out.println("NT> Expected response, recording data...");
-							p2p.ansAddr = InetAddress.getByName(addrStr);
-							p2p.ansPort = Integer.valueOf(portStr);
-							synchronized (p2p.ansFlag) {
-								p2p.ansFlag = true;
+							if(p2p.ansFlag) {
+								System.out.println("QP > Duplicate expected response, ignored.");
+							}
+							else {
+								System.out.println("QP > Expected response, recording data...");
+								p2p.ansAddr = InetAddress.getByName(addrStr);
+								p2p.ansPort = Integer.valueOf(portStr);
+								synchronized (p2p.ansFlag) {
+									p2p.ansFlag = true;
+								}
 							}
 						}
 						else synchronized (p2p.queries) {
 							if (p2p.queries.contains(q) && !q.replied) {
-								System.out.println("NT> Unexpected response, forwarding to the query senders...");
+								System.out.println("QP > Unexpected response, forwarding to the query senders...");
 								int i = p2p.queries.indexOf(q);
 								Query thisQuery = p2p.queries.get(i);
-//								for(Neighbor n : thisQuery.senders) {
-//									if(n == conn) continue;
-//									try {
-//										synchronized (n.outStream) {
-//											n.outStream.writeBytes(recvMsg + "\n");
-//										}
-//										System.out.println("NT> Response forwarded to " + n.outStr + ".");
-//									} catch (IOException e) {
-//										e.printStackTrace();
-//										System.out.println("NT> Failed forwarding response to " + n.outStr + ".");
-//									}
-//								}
 								Neighbor n = thisQuery.sender;
 								try {
 									synchronized (n.outStream) {
 										n.outStream.writeBytes(recvMsg + "\n");
 									}
-									System.out.println("NT> Response forwarded to " + n.outStr + ".");
+									System.out.println("QP > Response forwarded to " + n.outStr + ".");
 								} catch (IOException e) {
 									e.printStackTrace();
-									System.out.println("NT> Failed forwarding response to " + n.outStr + ".");
+									System.out.println("QP > Failed forwarding response to " + n.outStr + ".");
 								}
-//								p2p.queries.remove(thisQuery);
 								thisQuery.replied = true;
 							}
 							else {
-								System.out.println("NT> Duplicate response, ignored.");
+								System.out.println("QP > Duplicate response, ignored.");
 							}
 						}
 					}
 				}
 			} catch (IOException e) {
 				// e.printStackTrace();
-				System.out.println("NT> Connection lost with " + conn.outStr + ".");
+				System.out.println("QP > Connection lost with " + conn.outStr + ".");
 				synchronized (conn.stop) {
 					conn.stop = true;
 				}
 			}
 		}
 		conn.close();
-		p2p.neighbors.remove(conn);
+		synchronized(p2p.neighbors) {
+			if(p2p.neighbors.contains(conn))
+				p2p.neighbors.remove(conn);
+		}
 	}
 }
 
 class NeighborTimeOutThread extends Thread {
-	
-	public static final int REFRESH_INTERVAL = 100;
-	
 	Neighbor conn;
 	int sendTimer;
 	
@@ -374,20 +367,20 @@ class NeighborTimeOutThread extends Thread {
 	public void run() {
 		while (!conn.stop) {
 			if(conn.timer > p2p.HEARTBEAT_TIMEOUT) {
-				System.out.println("NTOT> Connection timeout with " + conn.outStr + ", closing connection.");
+				System.out.println("HB > Connection timeout with " + conn.outStr + ", closing connection.");
 				synchronized (conn.stop) {
 					conn.stop = true;
 				}
 			}
 
 			if(sendTimer > p2p.HEARTBEAT_INTERVAL) {
-//				System.out.println("NTT> Sending heartbeat message to " + conn.outStr);
+				System.out.println("HB > Sending heartbeat message to " + conn.outStr);
 				synchronized (conn.outStream) {
 					try {
 						conn.outStream.writeBytes("\n");
 					} catch (IOException ioe) {
 						// ioe.printStackTrace();
-						System.out.println("NTOT> Failed to deliver the heartbeat message.");
+						System.out.println("HB > Failed to deliver the heartbeat message.");
 						synchronized (conn.stop) {
 							conn.stop = true;
 						}
@@ -397,13 +390,13 @@ class NeighborTimeOutThread extends Thread {
 			}
 			
 			try {
-				sleep(REFRESH_INTERVAL);
+				sleep(p2p.TIMER_INTERVAL);
 			} catch (InterruptedException e) {};
 			
 			synchronized (conn.timer) {
-				conn.timer += REFRESH_INTERVAL;
+				conn.timer += p2p.TIMER_INTERVAL;
 			}
-			sendTimer += REFRESH_INTERVAL;
+			sendTimer += p2p.TIMER_INTERVAL;
 		}
 	}
 }
@@ -424,8 +417,61 @@ class QueryTimeOutThread extends Thread {
 		
 		synchronized (p2p.queries) {
 			if(p2p.queries.contains(query)) {
-				System.out.println("QTOT> Query ID " + query.id + " time out. Removing.");
+				System.out.println("QP > Query ID " + query.id + " time out. Removing.");
 				p2p.queries.remove(query);
+			}
+		}
+	}
+}
+
+class FileTransferThread extends Thread {
+	@Override
+	public void run() {
+		while (true) {
+			try {
+				Socket socket = p2p.ftcpServerSocket.accept();
+				BufferedReader inStream = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+				DataOutputStream outStream = new DataOutputStream(socket.getOutputStream());
+				String hostName = socket.getInetAddress().getHostAddress() + ":" + socket.getPort();
+				System.out.println("TP > TCP Connection established with " + hostName + ".");
+				
+				
+				String recvMsg = inStream.readLine();
+				int colon = recvMsg.indexOf(":");
+				if(colon < 0) continue;
+				String header = recvMsg.substring(0, colon);
+				if(header.equals("T")) {
+					String fileName = recvMsg.substring(colon + 1);
+//					System.out.println("TP > File transfer request for " + fileName + "." );
+					System.out.println("TP > Received file transfer request for " + fileName + "." );
+					String path = p2p.class.getResource("").getPath() + "/shared/" + fileName;
+					try {
+						System.out.println("TP > File transfer started..." );
+						File inFile = new File(path);
+						FileInputStream fInStream = new FileInputStream(inFile);
+						byte[] buffer = new byte[p2p.BUFFER_SIZE];
+						int len = 0;
+						while (true) {
+							len = fInStream.read(buffer);
+							if(len != -1) {
+								outStream.write(buffer,0,len);
+							}
+							else break;
+						}
+						System.out.println("TP > File transfer successfully finished.");
+						fInStream.close();
+						socket.close();
+					} catch (FileNotFoundException e) {
+						System.out.println("TP > Critical Error: File not found!");
+						outStream.writeBytes("\n");
+					}
+				}
+				inStream.close();
+				outStream.close();
+				socket.close();
+			} catch (IOException e) {
+				e.printStackTrace();
+				System.out.println("TP > IOException occured during file transfer.");
 			}
 		}
 	}
@@ -435,10 +481,12 @@ class QueryTimeOutThread extends Thread {
 
 public class p2p {
 	// Constants
-	static final int PDP_WAIT = 3000;
-	static final int HEARTBEAT_INTERVAL = 10000;
-	static final int HEARTBEAT_TIMEOUT = 12000;
-	static final int RESPONSE_TIMEOUT = 5000;
+	static final int HEARTBEAT_INTERVAL = 10000;		// Interval for sending heart beat messages
+	static final int HEARTBEAT_TIMEOUT  = 12000;		// Timeout for not receiving heart beat messages
+	static final int RESPONSE_TIMEOUT   = 5000;			// Timeout for not receiving response for a query
+	static final int TIMER_INTERVAL     = 100;			// Interval of timers
+	static final int QUERY_ID_RANGE     = 2147483647;	// Range of random Query ID
+	static final int BUFFER_SIZE        = 1024;			// Size of transporting buffer 
 	
 	// Address and ports
 	static InetAddress ipAddr;							// Local IP address
@@ -448,6 +496,7 @@ public class p2p {
 	static int         ftcpPort;						// Port for file transfer TCP connection
 	
 	// Sockets
+	static ServerSocket   ftcpServerSocket;             // File transfer TCP welcome socket
 	static ServerSocket   ntcpServerSocket;				// Neighbor TCP welcome socket
 	static DatagramSocket pdpSocket;    				// Peer Discovery Protocol UDP socket
 	
@@ -503,39 +552,49 @@ public class p2p {
 			scn.close();
 		} catch (FileNotFoundException fnfe) {
 			System.out.println(fnfe);
-			System.out.println("Warning: Lacking config_sharing.txt!");
+			System.out.println("Error: Lacking config_sharing.txt!");
 		}
 	}
 	
 	static void pdpInit(){
-		System.out.println("Info: Starting peer discovery thread...");
 		try {
 			pdpSocket = new DatagramSocket(pdpPort);
 			PdpThread PdpThread = new PdpThread(); 
 			PdpThread.start();
-			System.out.println("Info: Peer discovery protocol started.");
+			System.out.println("Info: Peer discovery service started.");
 		} catch (Exception e) {
 			System.out.println(e);
-			System.out.println("Error: Failed starting Peer discovery protocol.");
+			System.out.println("Error: Failed starting Peer discovery service.");
 		}
 	}
 	
 	static void ntcpInit() {
-		System.out.println("Info: Starting neighbor welcome thread...");
 		try {
 			ntcpServerSocket = new ServerSocket(ntcpPort);
 			NeighborWelcomeThread neighborWelcomeThread = new NeighborWelcomeThread(); 
 			neighborWelcomeThread.start();
-			System.out.println("Info: neighbor welcome thread started.");
+			System.out.println("Info: Neighbor service started.");
 		} catch (Exception e) {
 			System.out.println(e);
-			System.out.println("Error: Failed starting neighbor welcome thread.");
+			System.out.println("Error: Failed starting neighbor welcome service.");
+		}
+	}
+	
+	static void ftcpInit() {
+		try {
+			ftcpServerSocket = new ServerSocket(ftcpPort);
+			FileTransferThread fileTransferThread = new FileTransferThread(); 
+			fileTransferThread.start();
+			System.out.println("Info: File transfer service started.");
+		} catch (Exception e) {
+			System.out.println(e);
+			System.out.println("Error: Failed starting file transfer service.");
 		}
 	}
 	
 	static void pdpSendMsg(InetAddress addr, int port) {
 		String msg = new String("PI:" + ipAddrStr + ":" + pdpPort);
-		System.out.println("Sending Ping message:<" + msg + "> to " + addr.getHostAddress() + ":" + port);
+		System.out.println("Sending Ping message: \"" + msg + "\" to " + addr.getHostAddress() + ":" + port + "...");
 		byte[] sendData = msg.getBytes();
 		DatagramPacket sendPacket = new DatagramPacket(sendData, sendData.length, addr, port);
 		try {
@@ -546,15 +605,13 @@ public class p2p {
 		}
     }
 	
-	static void getFile(String file) {
+	static void getFile(String fileName) {
 		// Sending query
-		System.out.println("Preparing the query...");
 		Random r = new Random(System.currentTimeMillis());
-		int qid = r.nextInt();
-		System.out.println("Query ID: " + qid + ";");
-		
+		int qid = r.nextInt(QUERY_ID_RANGE);
+
 		queryID = qid;
-		queryFile = file;
+		queryFile = fileName;
 		synchronized (queryFlag) {
 			queryFlag = true;
 		}
@@ -562,8 +619,8 @@ public class p2p {
 			ansFlag = false;
 		}
 		
-		String queryMsg = "Q:" + queryID + ";" + file;
-		System.out.println("Query message:<" + queryMsg + ">.");
+		String queryMsg = "Q:" + queryID + ";" + fileName;
+		System.out.println("Query ID: " + qid + ", message: \"" + queryMsg + "\".");
 		
 		if(neighbors.size() == 0) {
 			System.out.println("Error: No neighbor connected!");
@@ -593,11 +650,11 @@ public class p2p {
 				return;
 			}
 			try {
-				Thread.sleep(100);
+				Thread.sleep(TIMER_INTERVAL);
 			} catch (InterruptedException e) {
 				e.printStackTrace();
 			}
-			count += 100;
+			count += TIMER_INTERVAL;
 		}
 		
 		// Process response
@@ -606,6 +663,46 @@ public class p2p {
 		}
 		System.out.println("Target file at " + ansAddr.getHostAddress() + ":" + ansPort + ".");
 		
+		// Getting the file
+		try {
+			Socket socket = new Socket(ansAddr, ansPort);
+			InputStream inStream = socket.getInputStream();
+			DataOutputStream outStream = new DataOutputStream(socket.getOutputStream());
+			System.out.println("Connected to " + ansAddr.getHostAddress() + ":" + ansPort + ".");
+			
+			outStream.writeBytes("T:" + fileName + "\n");
+			System.out.println("File request sent to server, waiting for transfer.");
+			
+			String path = p2p.class.getResource("").getPath() + "/obtained/" + fileName;
+			File outFile = new File(path);
+			if(!outFile.exists()) {
+				try {
+					outFile.createNewFile();
+					System.out.println("File /obtained/" + fileName + " created.");
+				} catch (IOException e) {
+					e.printStackTrace();
+				}
+			}
+			
+			System.out.println("Start receiving file...");
+			FileOutputStream fOutStream = new FileOutputStream(outFile);
+			byte[] buffer = new byte[BUFFER_SIZE];
+			int len = 0;
+			while (true) {
+				len = inStream.read(buffer);
+				if(len != -1) {
+					fOutStream.write(buffer, 0, len);
+				}
+				else break;
+			}
+			
+			System.out.println("File received and saved.");
+			fOutStream.close();
+			socket.close();
+		} catch (IOException ioe) {
+			ioe.printStackTrace();
+			System.out.println("Error: Failed connecting to file server.");
+		}
 	}
 
 	public static void main(String[] args) {
@@ -622,20 +719,6 @@ public class p2p {
 		
 		System.out.println("Starting the peer...");
 		
-//		if(args.length >= 3) {
-//			ntcpPort = Integer.valueOf(args[0]);
-//			ftcpPort = Integer.valueOf(args[1]);
-//			pdpPort = Integer.valueOf(args[2]);
-//			try {
-//				ipAddr = InetAddress.getLocalHost();
-//				ipAddrStr = ipAddr.getHostAddress();
-//			} catch (UnknownHostException e) {
-//				System.out.println(e);
-//			}
-//		}
-//		else {
-//			readConfigPeer();
-//		}
 		readConfigPeer();
 		readConfigSharing();
 
@@ -652,6 +735,7 @@ public class p2p {
 		
 		pdpInit();
 		ntcpInit();
+		ftcpInit();
 		
 		Scanner scn = new Scanner(System.in);
 		
@@ -661,7 +745,7 @@ public class p2p {
 				String addrStr = scn.next();
 				int port = scn.nextInt();
 				
-				System.out.println("Received command <Connect " + addrStr + " " + port + ">.");
+				System.out.println("Received command \"Connect " + addrStr + " " + port + "\".");
 				
 				try {
 					InetAddress addr = InetAddress.getByName(addrStr);
@@ -672,15 +756,19 @@ public class p2p {
 			}
 			else if (cmd.equals("Get")) {
 				String file = scn.next();
-				System.out.println("Received command <Get " + file + ">.");
+				System.out.println("Received command \"Get " + file + "\".");
 				getFile(file);
 			}
 			else if (cmd.equals("Leave")) {
+				System.out.println("Received command \"Leave\".");
+				System.out.println("Closing connections...");
 				peers.clear();
-				for(Neighbor i : neighbors) {
-					i.close();
+				synchronized (neighbors) {
+					for(Neighbor i : neighbors) {
+						i.close();
+					}
+					neighbors.clear();
 				}
-				neighbors.clear();
 				queries.clear();
 				System.out.println("All connection closed and all PDP history cleared.");
 			}
