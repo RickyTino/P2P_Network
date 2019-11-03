@@ -1,5 +1,5 @@
 # P2P Network
-Author: Ricky Chai
+Author: Ricky Chai  
 E-mail: kxc675@case.edu
 
 ## Project
