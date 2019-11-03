@@ -2,17 +2,30 @@ import java.io.*;
 import java.net.*;
 import java.util.*;
 
-// ------------------------------Data Types------------------------------
+// ------------------------------Types------------------------------
 
+// class Peer: Records peer discovery information 
 class Peer {
 	InetAddress addr;
 	int port;
-	String outStr;
+	String outStr;				// output String format
+	volatile Boolean fresh;		// Used for duplicate ping detection
 	
 	Peer (InetAddress ipaddr, int portnum){
 		addr = ipaddr;
 		port = portnum;
 		outStr = new String(addr.getHostAddress() + ":" + port);
+		fresh = true;
+		refresh();
+	}
+	
+	// Mark as fresh and start a timer. after the timeout, "fresh" is set to false.
+	void refresh() {
+		synchronized (fresh) {
+			fresh = true;
+		}
+		PdpTimeOutThread timer = new PdpTimeOutThread(this);
+		timer.start();
 	}
 	
 	@Override
@@ -23,12 +36,13 @@ class Peer {
 	}
 }
 
+// class Neighbor: keeps the state of a neighbor TCP connection
 class Neighbor {
 	InetAddress addr;
 	int port;
 	String outStr;
 	volatile Integer timer;
-	volatile Boolean stop;
+	volatile Boolean stop;  // Used as a sign to stop all the threads related to this neighbor
 	
 	Socket socket;
 	BufferedReader inStream;
@@ -59,6 +73,7 @@ class Neighbor {
 	}
 }
 
+// class Query: keeps the state of a query. Removed after timeout.
 class Query {
 	int id;
 	String file;
@@ -81,6 +96,7 @@ class Query {
 
 // ------------------------------Threads------------------------------
 
+// Work as a UDP server for peer discovery
 class PdpThread extends Thread {
 	@Override
 	public void run(){
@@ -88,6 +104,7 @@ class PdpThread extends Thread {
 		InetAddress addr = null;
 		
 		while (true) {
+			// Receiving message
 			byte[] recvData = new byte[1024];
 			DatagramPacket recvPacket = new DatagramPacket(recvData, recvData.length);
 			synchronized (p2p.pdpSocket) {
@@ -98,6 +115,8 @@ class PdpThread extends Thread {
 					return;
 				}
 			}
+			
+			// Processing received message
 			String recvMsg = new String(recvPacket.getData()).trim();
 			InetAddress fromAddr = recvPacket.getAddress();
 			int fromPort = recvPacket.getPort();
@@ -116,26 +135,28 @@ class PdpThread extends Thread {
 				continue;
 			}
 			
-			if(header.equals("PI:")) {
+			
+			if(header.equals("PI:")) {    // Is a ping message
 				Peer newPeer = new Peer(addr, port);
-				if(p2p.peers.contains(newPeer)) {
-					System.out.println("PDP> Ping from duplicate Peer, ignored.");
-					continue;
-				}
-				
-				// Load balancing
-				if(p2p.neighbors.size() < 3) {
-					sendPong(addr, port);
-					msgBroadcast(recvData);
+				if(p2p.peers.contains(newPeer)) {  // If from a previous connected peer (not fresh)
+					int i = p2p.peers.indexOf(newPeer);
+					Peer thisPeer = p2p.peers.get(i);
+					if(thisPeer.fresh) {
+						// Ping from fresh peer must be duplicate message
+						System.out.println("PDP> Ping from fresh duplicate Peer, ignored.");
+						continue;
+					}
+					thisPeer.refresh();      // Mark as fresh and start the timer
+					msgBroadcast(recvData);  // Broadcast the message
+					sendPong(addr, port);    // Send pong message to fresh peer
 				}
 				else {
+					p2p.peers.add(newPeer);
 					msgBroadcast(recvData);
 					sendPong(addr, port);
 				}
-				
-				p2p.peers.add(newPeer);
 			}
-			else if(header.equals("PO:")) {
+			else if(header.equals("PO:")) {    // Is a pong message
 				Peer fromPeer = new Peer(fromAddr, fromPort);
 				if(p2p.peers.contains(fromPeer)) {
 					System.out.println("PDP> Pong From duplicate peer, ignored.");
@@ -145,17 +166,17 @@ class PdpThread extends Thread {
 				Peer newPeer = new Peer(addr, fromPort);
 				p2p.peers.add(newPeer);
 				
+				// Only process pong message when less than 2 neighbors
+				// i.e. accepting the first 2 pong message to arrive
 				if(p2p.neighbors.size() < 2) {
 					String peerStr = addr.getHostAddress() + ":" + port;
 					System.out.println("PDP> Establishing TCP connection with " + peerStr + "...");
 					try {
 						Socket socket = new Socket(addr, port);
-//						Socket socket = new Socket();
-//						socket.bind(new InetSocketAddress(p2p.ntcpPort));
-//						socket.connect(new InetSocketAddress(addr, port));
 						Neighbor neighbor = new Neighbor(socket);
 						p2p.neighbors.add(neighbor);
-						NeighborThread neighborThread = new NeighborThread(neighbor);
+						// Start a thread for each connection
+						NeighborThread neighborThread = new NeighborThread(neighbor);    
 						neighborThread.start();
 					} catch (IOException e) {
 						e.printStackTrace();
@@ -167,7 +188,7 @@ class PdpThread extends Thread {
 		}
 	}
 	
-	void sendPong(InetAddress addr, int port) {// throws IOException{
+	void sendPong(InetAddress addr, int port) {
 		String thisPeerStr = p2p.ipAddr.getHostAddress() + ":" + p2p.ntcpPort;
 		String peerStr = addr.getHostAddress() + ":" + port;
 		
@@ -190,6 +211,7 @@ class PdpThread extends Thread {
 	
 	void msgBroadcast(byte[] sendData) {
 		for (Peer p : p2p.peers) {
+			if(p.fresh) continue;  // No broadcast to fresh peer
 			System.out.println("PDP> Broadcasting " + new String(sendData).trim() + " to " + p.outStr + "...");
 			DatagramPacket sendPacket = new DatagramPacket(sendData, sendData.length, p.addr, p.port);
 			try {
@@ -204,6 +226,28 @@ class PdpThread extends Thread {
 	}
 }
 
+// Used to set the "fresh" sign of peer to false after a certain timeout
+class PdpTimeOutThread extends Thread {
+	Peer p;
+	
+	public PdpTimeOutThread(Peer peer) {
+		p = peer;
+	}
+	
+	@Override
+	public void run() {
+		try {
+			sleep(p2p.PDP_TIMEOUT);
+		} catch (InterruptedException e) {
+			e.printStackTrace();
+		}
+		synchronized (p.fresh) {
+			p.fresh = false;
+		}
+	}
+}
+
+// Wait on the welcome socket for new TCP connection
 class NeighborWelcomeThread extends Thread {
 	@Override
 	public void run() {
@@ -216,13 +260,13 @@ class NeighborWelcomeThread extends Thread {
 				Thread neighborThread = new NeighborThread(neighbor);
 				neighborThread.start();
 			} catch (IOException e) {
-				// e.printStackTrace();
 				break;
 			}
 		}
 	}
 }
 
+// A thread for each neighbor, work as a TCP server
 class NeighborThread extends Thread {
 	Neighbor conn;
 	
@@ -235,31 +279,36 @@ class NeighborThread extends Thread {
 		NeighborTimeOutThread timeOutThread = new NeighborTimeOutThread(conn);
 		timeOutThread.start();
 		
-		while (!conn.stop) {
+		while (!conn.stop) {   // Controlled by the stop sign of each neighbor
 			try {
+				// Receiving message
 				String recvMsg = conn.inStream.readLine();
 				if(recvMsg == null) throw new IOException();
+				
+				// Reset the timer upon receiving any kind of message
 				synchronized (conn.timer) {
-					conn.timer = 0;
+					conn.timer = 0;  
 				}
 				
-				if(recvMsg.length() == 0) {
+				if(recvMsg.length() == 0) {   // It is a heartbeat message
 					System.out.println("HB > Heartbeat message received from " + conn.outStr + ".");
 				}
-				else {
+				else {     // It is a message with content
+					// Separating strings
 					int colon = recvMsg.indexOf(":");
 					String header = recvMsg.substring(0, colon);
 					int semicolon = recvMsg.indexOf(";");
 					int qid = Integer.valueOf(recvMsg.substring(colon + 1, semicolon));
 					
-					if(header.equals("Q")) {
+					if(header.equals("Q")) {    // Is a query message
 						System.out.println("QP > Received query message \"" + recvMsg + "\" from " + conn.outStr + ".");
 						String filename = recvMsg.substring(semicolon + 1);
 						Query q = new Query(qid, filename);
 						if(p2p.queryFile.equals(filename) && p2p.queryID == qid) {
+							// Is a query of this host, should be ignored
 							System.out.println("QP > Loopback query, ignored.");
 						}
-						else if(p2p.files.contains(filename)) {
+						else if(p2p.files.contains(filename)) {     // Have the file
 							System.out.println("QP > File found, sending response...");
 							String reply = "R:" + qid + ";" + p2p.ipAddrStr + ":" + p2p.ftcpPort + ";" + filename + "\n";
 							synchronized (conn.outStream) {
@@ -267,7 +316,7 @@ class NeighborThread extends Thread {
 							}
 							System.out.println("QP > Response sent to " + conn.outStr + ".");
 						}
-						else synchronized (p2p.queries) {
+						else synchronized (p2p.queries) {    // Does not have the file
 							if(p2p.queries.contains(q)) {
 								System.out.println("QP > File not found, duplicate query, ignored.");
 							}
@@ -276,6 +325,7 @@ class NeighborThread extends Thread {
 								Query newQuery = new Query(qid, filename);
 								newQuery.sender = conn;
 								p2p.queries.add(newQuery);
+								// Start a timer for the query timeout
 								QueryTimeOutThread qtot = new QueryTimeOutThread(newQuery);
 								qtot.start();
 								
@@ -294,7 +344,7 @@ class NeighborThread extends Thread {
 							}
 						}
 					}
-					else if(header.equals("R")) {
+					else if(header.equals("R")) {    // Is a response message
 						System.out.println("QP > Received response message \"" + recvMsg + "\" from " + conn.outStr + ".");
 						int colon2 = recvMsg.lastIndexOf(":");
 						int semicolon2 = recvMsg.lastIndexOf(";");
@@ -302,8 +352,10 @@ class NeighborThread extends Thread {
 						String portStr = recvMsg.substring(colon2 + 1, semicolon2);
 						String filename = recvMsg.substring(semicolon2 + 1);
 						Query q = new Query(qid, filename);
+						
 						if(p2p.queryFlag && p2p.queryFile.equals(filename) && p2p.queryID == qid) {
-							if(p2p.ansFlag) {
+							// Is the response of the waiting query
+							if(p2p.ansFlag) {    // An answered query
 								System.out.println("QP > Duplicate expected response, ignored.");
 							}
 							else {
@@ -315,7 +367,7 @@ class NeighborThread extends Thread {
 								}
 							}
 						}
-						else synchronized (p2p.queries) {
+						else synchronized (p2p.queries) {    // Not an expected response
 							if (p2p.queries.contains(q) && !q.replied) {
 								System.out.println("QP > Unexpected response, forwarding to the query senders...");
 								int i = p2p.queries.indexOf(q);
@@ -339,13 +391,14 @@ class NeighborThread extends Thread {
 					}
 				}
 			} catch (IOException e) {
-				// e.printStackTrace();
 				System.out.println("QP > Connection lost with " + conn.outStr + ".");
 				synchronized (conn.stop) {
 					conn.stop = true;
 				}
 			}
 		}
+		
+		// Things to do before exiting the thread
 		conn.close();
 		synchronized(p2p.neighbors) {
 			if(p2p.neighbors.contains(conn))
@@ -354,6 +407,7 @@ class NeighborThread extends Thread {
 	}
 }
 
+// Sends heartbeat message to the neighbor and detect neighbor timeout
 class NeighborTimeOutThread extends Thread {
 	Neighbor conn;
 	int sendTimer;
@@ -401,6 +455,7 @@ class NeighborTimeOutThread extends Thread {
 	}
 }
 
+// Used as a timer for query timeout
 class QueryTimeOutThread extends Thread {
 	Query query;
 	
@@ -424,6 +479,8 @@ class QueryTimeOutThread extends Thread {
 	}
 }
 
+// Wait for file transfer TCP connection, process the request and send back the requested file
+// Work as a file transfer server
 class FileTransferThread extends Thread {
 	@Override
 	public void run() {
@@ -442,7 +499,6 @@ class FileTransferThread extends Thread {
 				String header = recvMsg.substring(0, colon);
 				if(header.equals("T")) {
 					String fileName = recvMsg.substring(colon + 1);
-//					System.out.println("TP > File transfer request for " + fileName + "." );
 					System.out.println("TP > Received file transfer request for " + fileName + "." );
 					String path = p2p.class.getResource("").getPath() + "/shared/" + fileName;
 					try {
@@ -481,40 +537,42 @@ class FileTransferThread extends Thread {
 
 public class p2p {
 	// Constants
-	static final int HEARTBEAT_INTERVAL = 10000;		// Interval for sending heart beat messages
-	static final int HEARTBEAT_TIMEOUT  = 12000;		// Timeout for not receiving heart beat messages
-	static final int RESPONSE_TIMEOUT   = 5000;			// Timeout for not receiving response for a query
-	static final int TIMER_INTERVAL     = 100;			// Interval of timers
-	static final int QUERY_ID_RANGE     = 2147483647;	// Range of random Query ID
-	static final int BUFFER_SIZE        = 1024;			// Size of transporting buffer 
+	static final int PDP_TIMEOUT        = 3000;         // Timeout for peer's freshness
+	static final int HEARTBEAT_INTERVAL = 10000;        // Interval for sending heart beat messages
+	static final int HEARTBEAT_TIMEOUT  = 12000;        // Timeout for not receiving heart beat messages
+	static final int RESPONSE_TIMEOUT   = 5000;         // Timeout for not receiving response for a query
+	static final int TIMER_INTERVAL     = 100;          // Interval of timers
+	static final int QUERY_ID_RANGE     = 2147483647;   // Range of random Query ID
+	static final int BUFFER_SIZE        = 1024;         // Size of transporting buffer 
 	
 	// Address and ports
-	static InetAddress ipAddr;							// Local IP address
-	static String      ipAddrStr;						// String format Local IP address
-	static int         pdpPort;							// Port for peer discovery protocol (PDP)
-	static int         ntcpPort;						// Port for neighboring TCP connection
-	static int         ftcpPort;						// Port for file transfer TCP connection
+	static InetAddress ipAddr;                          // Local IP address
+	static String      ipAddrStr;                       // String format Local IP address
+	static int         pdpPort;                         // Port for peer discovery protocol (PDP)
+	static int         ntcpPort;                        // Port for neighboring TCP connection
+	static int         ftcpPort;                        // Port for file transfer TCP connection
 	
 	// Sockets
 	static ServerSocket   ftcpServerSocket;             // File transfer TCP welcome socket
-	static ServerSocket   ntcpServerSocket;				// Neighbor TCP welcome socket
-	static DatagramSocket pdpSocket;    				// Peer Discovery Protocol UDP socket
+	static ServerSocket   ntcpServerSocket;             // Neighbor TCP welcome socket
+	static DatagramSocket pdpSocket;                    // Peer Discovery Protocol UDP socket
 	
 	// Lists
-	static Vector<Neighbor> neighbors;					// Neighboring peer connections (have TCP connections) 
-	static Vector<Peer>     peers;						// All known peers
-	static Vector<Query>    queries;					// Queries from another peer
-	static Vector<String>   files;						// All sharing files
+	static Vector<Neighbor> neighbors;                  // Neighboring peer connections (have TCP connections) 
+	static Vector<Peer>     peers;                      // All known peers
+	static Vector<Query>    queries;                    // Queries from another peer
+	static Vector<String>   files;                      // All sharing files
 	
-	// Variables
-	static volatile int     queryID;
-	static volatile String  queryFile;
-	static volatile Boolean queryFlag;
+	// Shared Variables
+	static volatile int     queryID;                    // ID of the in-processing query
+	static volatile String  queryFile;                  // Requesting file name
+	static volatile Boolean queryFlag;                  // Indicates the query is waiting for an answer
 	
-	static volatile InetAddress ansAddr;
-	static volatile int         ansPort;
-	static volatile Boolean     ansFlag;
+	static volatile InetAddress ansAddr;                // IP address, answer of the query
+	static volatile int         ansPort;                // port #, answer of the query
+	static volatile Boolean     ansFlag;                // Indicates that the answer is available
 	
+	// Read config_peer.txt for peer configuration
 	static void readConfigPeer(){
 		String pwd = p2p.class.getResource("").getPath() + "config_peer.txt";
 		try {
@@ -528,6 +586,8 @@ public class p2p {
 			pdpPort   = scn.nextInt();
 			scn.close();
 		} catch (FileNotFoundException fnfe) {
+			// If no config_peer found, uses the default settings
+			// Just in case...Not necessary hard-coded value
 			System.out.println(fnfe);
 			System.out.println("Warning: Lacking config_peer.txt, using default settings.");
 			ntcpPort = 52020;
@@ -542,6 +602,7 @@ public class p2p {
 		};
 	}
 	
+	// Read config_sharing.txt for list of files to share
 	static void readConfigSharing() {
 		String pwd = p2p.class.getResource("").getPath() + "config_sharing.txt";
 		try {
@@ -556,6 +617,7 @@ public class p2p {
 		}
 	}
 	
+	// Initialize peer discovery protocol service thread
 	static void pdpInit(){
 		try {
 			pdpSocket = new DatagramSocket(pdpPort);
@@ -568,6 +630,7 @@ public class p2p {
 		}
 	}
 	
+	// Initialize neighbor service thread
 	static void ntcpInit() {
 		try {
 			ntcpServerSocket = new ServerSocket(ntcpPort);
@@ -580,6 +643,7 @@ public class p2p {
 		}
 	}
 	
+	// Initialize file transfer service thread
 	static void ftcpInit() {
 		try {
 			ftcpServerSocket = new ServerSocket(ftcpPort);
@@ -592,6 +656,7 @@ public class p2p {
 		}
 	}
 	
+	// Send PDP message to the specified peer
 	static void pdpSendMsg(InetAddress addr, int port) {
 		String msg = new String("PI:" + ipAddrStr + ":" + pdpPort);
 		System.out.println("Sending Ping message: \"" + msg + "\" to " + addr.getHostAddress() + ":" + port + "...");
@@ -605,11 +670,13 @@ public class p2p {
 		}
     }
 	
+	// inquire and get file from peers
 	static void getFile(String fileName) {
-		// Sending query
+		// Generate random query ID
 		Random r = new Random(System.currentTimeMillis());
 		int qid = r.nextInt(QUERY_ID_RANGE);
-
+		
+		// Validate the query
 		queryID = qid;
 		queryFile = fileName;
 		synchronized (queryFlag) {
@@ -619,6 +686,7 @@ public class p2p {
 			ansFlag = false;
 		}
 		
+		// Sending query
 		String queryMsg = "Q:" + queryID + ";" + fileName;
 		System.out.println("Query ID: " + qid + ", message: \"" + queryMsg + "\".");
 		
@@ -705,6 +773,7 @@ public class p2p {
 		}
 	}
 
+	// Main program
 	public static void main(String[] args) {
 		
 		neighbors = new Vector<Neighbor>();
@@ -738,7 +807,7 @@ public class p2p {
 		ftcpInit();
 		
 		Scanner scn = new Scanner(System.in);
-		
+		// Main loop
 		while (true) {
 			String cmd = scn.next();
 			if(cmd.equals("Connect")) {
@@ -777,9 +846,11 @@ public class p2p {
 				System.exit(0);
 			}
 			else {
-				System.out.println("Unrecognized command.");
+				System.out.println("Invalid command: \"" + cmd + "\".");
 			}
 		}
 	}
 }
 
+
+// End of file
