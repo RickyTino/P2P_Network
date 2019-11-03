@@ -3,7 +3,7 @@ Author: Ricky Chai
 E-mail: kxc675@case.edu
 
 ## Project
-EECS 425 project 1
+EECS 425 project 1  
 See the PDF file attached.
 
 ## Some Specification
